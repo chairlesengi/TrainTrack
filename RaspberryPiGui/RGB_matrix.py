@@ -9,6 +9,8 @@ import logging
 import sys
 import ssl
 import os
+import socket
+from urllib.error import URLError, HTTPError
 from typing import List, Dict
 from datetime import datetime
 import time
@@ -21,6 +23,9 @@ try:
     ssl._create_default_https_context = ssl._create_unverified_context
 except:
     pass
+
+# Avoid long blocking network calls
+socket.setdefaulttimeout(10)
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -360,7 +365,7 @@ LED_COUNT = MATRIX_WIDTH * MATRIX_HEIGHT
 LED_PIN = 18  # GPIO pin
 LED_FREQ_HZ = 800000
 LED_DMA = 10
-LED_BRIGHTNESS = 4
+LED_BRIGHTNESS = 3
 LED_INVERT = False
 LED_CHANNEL = 0
 
@@ -969,18 +974,17 @@ def run_matrix(station_arg=None):
     page = 0
     consecutive_errors = 0
     max_consecutive_errors = 5
+    last_render_had_data = False
     
     try:
         while True:
             try:
-                # tracker is already loaded; just query it
                 station = tracker.get_station(selected_station)
                 arrivals = tracker.get_arrivals(station)
-                
-                # Reset error counter on success
+
+                # Reset on success
                 consecutive_errors = 0
-                
-                # Group by route AND direction (not just route)
+
                 trains_by_route_direction = {}
                 for direction in sorted(arrivals.keys()):
                     trains = arrivals[direction]
@@ -989,48 +993,50 @@ def run_matrix(station_arg=None):
                         if key not in trains_by_route_direction:
                             trains_by_route_direction[key] = []
                         trains_by_route_direction[key].append(minutes_away)
-                
+
                 for key in trains_by_route_direction:
                     trains_by_route_direction[key].sort()
-                
+
                 all_route_directions = sorted(trains_by_route_direction.keys())
                 total_pages = len(all_route_directions)
-                
+
                 if total_pages == 0:
-                    clear()
+                    # Keep previous frame if we recently had valid data
+                    if not last_render_had_data:
+                        clear()
                 else:
                     current_route, current_direction = all_route_directions[page % total_pages]
                     arrival_times = trains_by_route_direction[(current_route, current_direction)]
                     first_minutes = arrival_times[0]
                     second_minutes = arrival_times[1] if len(arrival_times) > 1 else None
                     draw_two_arrivals(current_route, first_minutes, second_minutes, current_direction)
-                
+                    last_render_had_data = True
+
                 page = (page + 1) % max(1, total_pages)
                 time.sleep(2.5)
-                
-            except (ConnectionError, TimeoutError, KeyError, ValueError, AttributeError) as e:
-                # Network or data parsing error
+
+            except (ConnectionError, TimeoutError, URLError, HTTPError, OSError, KeyError, ValueError, AttributeError) as e:
                 consecutive_errors += 1
-                logger.warning(f"API error (attempt {consecutive_errors}/{max_consecutive_errors}): {e}")
-                
-                if consecutive_errors >= max_consecutive_errors:
-                    logger.error(f"Too many consecutive errors. Restarting tracker...")
+                backoff = min(30, 2 ** min(consecutive_errors, 5))
+                logger.warning(f"API/network error ({consecutive_errors}): {e}. Retrying in {backoff}s")
+
+                # Only rebuild tracker after repeated parser/data issues
+                if isinstance(e, (KeyError, ValueError, AttributeError)) and consecutive_errors >= max_consecutive_errors:
+                    logger.error("Repeated data errors. Reinitializing tracker.")
                     global _TRACKER
-                    _TRACKER = None  # Force reload
+                    _TRACKER = None
                     tracker = initialize_tracker()
                     consecutive_errors = 0
-                
-                clear()
-                time.sleep(3)  # Wait before retry
-                
+
+                # Don't clear display on transient network failures; keep last good frame
+                time.sleep(backoff)
+
             except KeyboardInterrupt:
                 clear()
                 break
-                
+
             except Exception as e:
-                # Unknown error—log and continue
                 logger.error(f"Unexpected error: {e}", exc_info=True)
-                clear()
                 time.sleep(3)
                 
     finally:
