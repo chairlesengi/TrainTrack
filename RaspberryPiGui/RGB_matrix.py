@@ -680,15 +680,9 @@ def run_matrix(station_arg=None):
             last_station = load_last_station()
             if last_station:
                 selected_station = last_station
-                save_last_station(selected_station)
             else:
-                default_station = os.getenv("TRAINTRACK_DEFAULT_STATION")
-                if default_station:
-                    selected_station = default_station
-                    save_last_station(selected_station)
-                else:
-                    logger.error("No TTY and no saved station. Run once interactively to save a station.")
-                    return
+                selected_station = os.getenv("TRAINTRACK_DEFAULT_STATION", "F20")
+            save_last_station(selected_station)
         else:
             def select_station():
                 print("\nAvailable stations:")
