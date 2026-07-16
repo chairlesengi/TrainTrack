@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from traintrack.models import Station, Train, Alert
 from traintrack.station_tracker import MTAStationTracker
 from traintrack.gtfs_loader import GTFSLoader
-from traintrack.mta_client import MTAClient
+from traintrack.mta_client import MTAClient, MTA_FEEDS, feed_urls_for_routes
 
 
 class TestGTFSLoader(unittest.TestCase):
@@ -83,6 +83,15 @@ class TestMTAClient(unittest.TestCase):
 
         # Verify results (would need actual protobuf mock data)
         self.assertIsInstance(arrivals, list)
+
+    def test_feed_urls_for_routes_uses_only_required_feeds(self):
+        self.assertEqual(
+            feed_urls_for_routes(["A", "C", "1"]),
+            [MTA_FEEDS["1"], MTA_FEEDS["7"]],
+        )
+
+    def test_feed_urls_for_unknown_route_falls_back_to_all_feeds(self):
+        self.assertEqual(feed_urls_for_routes(["UNKNOWN"]), list(MTA_FEEDS.values()))
 
     @staticmethod
     def _create_mock_protobuf() -> bytes:
@@ -189,6 +198,12 @@ class TestMTAStationTracker(unittest.TestCase):
 
         station = self.tracker.get_station("127N")
         arrivals = self.tracker.get_arrivals(station)
+
+        mock_get_arrivals.assert_called_once_with(
+            "127N",
+            feed_urls=[MTA_FEEDS["7"]],
+            related_stop_ids=["127N"],
+        )
 
         # Should have two directions
         self.assertIn("Downtown", arrivals)

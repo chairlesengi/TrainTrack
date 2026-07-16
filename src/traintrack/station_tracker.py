@@ -6,7 +6,7 @@ from datetime import datetime
 
 from .models import Station, StationData, Alert
 from .gtfs_loader import GTFSLoader
-from .mta_client import MTAClient
+from .mta_client import MTAClient, feed_urls_for_routes
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,12 @@ class MTAStationTracker:
         """
         # Get all arrivals for this stop (include related platform IDs)
         related_stop_ids = self.gtfs_loader.get_related_stop_ids(station.stop_id)
-        arrivals = self.mta_client.get_arrivals_for_stop(station.stop_id, related_stop_ids=related_stop_ids)
+        feed_urls = feed_urls_for_routes(station.lines)
+        arrivals = self.mta_client.get_arrivals_for_stop(
+            station.stop_id,
+            feed_urls=feed_urls,
+            related_stop_ids=related_stop_ids,
+        )
 
         # Group by route and direction
         result: Dict[str, List[tuple]] = {}

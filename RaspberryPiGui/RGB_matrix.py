@@ -9,14 +9,10 @@ import logging
 import sys
 import ssl
 import os
-import socket
 from urllib.error import URLError, HTTPError
 from typing import List, Dict
 from datetime import datetime
 import time
-import threading
-# Add missing import for traceback (used in main)
-import traceback
 
 # Suppress SSL warnings for development
 try:
@@ -24,13 +20,9 @@ try:
 except:
     pass
 
-# Avoid long blocking network calls
-socket.setdefaulttimeout(10)
-
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.traintrack.station_tracker import MTAStationTracker
-from src.traintrack.gtfs_loader import GTFSLoader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -663,17 +655,17 @@ def run_matrix(station_arg=None):
         return
 
     print("Loading MTA data... (this may take a minute)")
-    tracker = initialize_tracker()
-    all_stations = get_all_stations()
+    try:
+        tracker = initialize_tracker()
+        all_stations = get_all_stations()
+    except Exception as exc:
+        logger.error("Unable to load MTA station data: %s", exc)
+        return
     sorted_stations = sorted(all_stations.items(), key=lambda kv: kv[1].lower())
-
-    strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
-    strip.begin()
 
     # If station arg provided, use it
     if station_arg:
         selected_station = station_arg
-        save_last_station(selected_station)
     else:
         # If no TTY (systemd), auto-resume last station or optional default
         if not sys.stdin.isatty():
@@ -682,7 +674,6 @@ def run_matrix(station_arg=None):
                 selected_station = last_station
             else:
                 selected_station = os.getenv("TRAINTRACK_DEFAULT_STATION", "F20")
-            save_last_station(selected_station)
         else:
             def select_station():
                 print("\nAvailable stations:")
@@ -737,7 +728,26 @@ def run_matrix(station_arg=None):
             selected_station = select_station()
             if selected_station is None:
                 return
-            save_last_station(selected_station)
+
+    # Validate once before entering the forever loop. Previously a stale saved
+    # station caused ValueError -> full GTFS reload -> ValueError forever.
+    try:
+        station = tracker.get_station(selected_station)
+    except (TypeError, ValueError):
+        logger.error(
+            "Station %r is not valid. Select a station interactively or update "
+            "TRAINTRACK_DEFAULT_STATION.",
+            selected_station,
+        )
+        return
+    save_last_station(selected_station)
+
+    try:
+        strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
+        strip.begin()
+    except Exception as exc:
+        logger.error("Unable to initialize the RGB matrix: %s", exc)
+        return
 
     # --- Fix mirroring: x=0 is rightmost, x=31 is leftmost ---
     def matrix_index(x, y):
@@ -973,7 +983,6 @@ def run_matrix(station_arg=None):
     try:
         while True:
             try:
-                station = tracker.get_station(selected_station)
                 arrivals = tracker.get_arrivals(station)
 
                 # Reset on success
@@ -983,6 +992,9 @@ def run_matrix(station_arg=None):
                 for direction in sorted(arrivals.keys()):
                     trains = arrivals[direction]
                     for route_id, minutes_away, destination in trains:
+                        if not route_id:
+                            logger.warning("Ignoring arrival with an empty route ID")
+                            continue
                         key = (route_id, direction)
                         if key not in trains_by_route_direction:
                             trains_by_route_direction[key] = []
@@ -1015,27 +1027,36 @@ def run_matrix(station_arg=None):
                 logger.warning(f"API/network error ({consecutive_errors}): {e}. Retrying in {backoff}s")
 
                 # Only rebuild tracker after repeated parser/data issues
-                if isinstance(e, (KeyError, ValueError, AttributeError)) and consecutive_errors >= max_consecutive_errors:
+                if isinstance(e, (KeyError, AttributeError)) and consecutive_errors >= max_consecutive_errors:
                     logger.error("Repeated data errors. Reinitializing tracker.")
-                    global _TRACKER
-                    _TRACKER = None
-                    tracker = initialize_tracker()
-                    consecutive_errors = 0
+                    try:
+                        global _TRACKER
+                        _TRACKER = None
+                        tracker = initialize_tracker()
+                        station = tracker.get_station(selected_station)
+                        consecutive_errors = 0
+                    except Exception as reload_error:
+                        logger.error("Tracker reload failed: %s", reload_error)
 
                 # Don't clear display on transient network failures; keep last good frame
                 time.sleep(backoff)
 
             except KeyboardInterrupt:
-                clear()
                 break
 
             except Exception as e:
+                consecutive_errors += 1
                 logger.error(f"Unexpected error: {e}", exc_info=True)
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error("Stopping after %d repeated unexpected errors", consecutive_errors)
+                    break
                 time.sleep(3)
                 
     finally:
-        if PixelStrip is not None:
+        try:
             clear()
+        except Exception as exc:
+            logger.warning("Could not clear RGB matrix during shutdown: %s", exc)
         if _TRACKER is not None:
             try:
                 _TRACKER.mta_client._cache.clear()

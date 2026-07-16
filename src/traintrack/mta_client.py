@@ -23,6 +23,38 @@ MTA_FEEDS = {
     "7": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs",  # 1-7, S, SIR
 }
 
+# Routes carried by each realtime feed. Keeping this mapping next to MTA_FEEDS
+# prevents clients from waiting on all seven endpoints for a station served by
+# only one or two feed groups.
+ROUTE_TO_FEED_KEY = {
+    **dict.fromkeys(("A", "C", "E", "H"), "1"),
+    **dict.fromkeys(("B", "D", "F", "M"), "2"),
+    "G": "3",
+    **dict.fromkeys(("J", "Z"), "4"),
+    **dict.fromkeys(("N", "Q", "R", "W"), "5"),
+    "L": "6",
+    **dict.fromkeys(("1", "2", "3", "4", "5", "6", "7", "S", "SIR"), "7"),
+}
+
+
+def feed_urls_for_routes(route_ids: List[str]) -> List[str]:
+    """Return the minimum realtime feed set needed for ``route_ids``.
+
+    Unknown or missing routes fall back to every feed so callers do not lose
+    arrivals when the MTA adds or renames a service.
+    """
+    if not route_ids:
+        return list(MTA_FEEDS.values())
+
+    feed_keys = []
+    for route_id in route_ids:
+        feed_key = ROUTE_TO_FEED_KEY.get(route_id)
+        if feed_key is None:
+            return list(MTA_FEEDS.values())
+        if feed_key not in feed_keys:
+            feed_keys.append(feed_key)
+    return [MTA_FEEDS[key] for key in feed_keys]
+
 
 class MTAClient:
     """Fetches and parses MTA GTFS-Realtime data."""
